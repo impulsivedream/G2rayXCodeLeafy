@@ -19,7 +19,7 @@ mkdir -p "$DATA_DIR" "$LOG_DIR"
 [ ! -f "$CUSTOM_IP_FILE" ] && echo "94.130.50.12" > "$CUSTOM_IP_FILE"
 CUSTOM_IP=$(cat "$CUSTOM_IP_FILE" 2>/dev/null || true)
 
-[ ! -f "$KEEPALIVE_CONF" ] && echo "180" > "$KEEPALIVE_CONF"
+[ ! -f "$KEEPALIVE_CONF" ] && echo "60" > "$KEEPALIVE_CONF"
 
 if [ -z "${CODESPACE_NAME:-}" ]; then
 	if command -v gh >/dev/null 2>&1; then
@@ -92,14 +92,38 @@ keepalive_status() {
 	fi
 }
 
+_keepalive_loop() {
+	local interval_sec="$1"
+	local _beat_file="$DATA_DIR/.hb"
+	while true; do
+		# Local filesystem activity — resets codespace idle timer
+		date +%s > "$_beat_file" 2>/dev/null || true
+
+		# Self-ping: keeps the port warm and marks the codespace as active
+		curl -s --max-time 4 "http://127.0.0.1:${XRAY_PORT}" >/dev/null 2>&1 || true
+
+		# External ping: prevents network-level idle detection
+		curl -s --max-time 5 https://github.com >/dev/null 2>&1 || true
+
+		# Codespace public URL ping: tells GitHub the forwarded port is alive
+		curl -s --max-time 6 "https://${PORT_DOMAIN}" >/dev/null 2>&1 || true
+
+		# Watchdog: restart xray silently if it crashed
+		if ! pgrep -f "$XRAY_BIN run" >/dev/null 2>&1; then
+			start_xray >/dev/null 2>&1 || true
+			sleep 3
+			ensure_codespace_port_public >/dev/null 2>&1 || true
+		fi
+
+		sleep "$interval_sec"
+	done
+}
+
 start_keepalive() {
 	local interval_sec=$1
 	echo "$interval_sec" > "$KEEPALIVE_CONF"
 	[ -f "$KEEPALIVE_PID" ] && kill "$(cat "$KEEPALIVE_PID" 2>/dev/null)" 2>/dev/null || true
-	(while true; do
-		curl -s --max-time 5 https://github.com >/dev/null 2>&1 || true
-		sleep "$interval_sec"
-	done) &
+	_keepalive_loop "$interval_sec" &
 	echo $! > "$KEEPALIVE_PID"
 	disown
 }
@@ -280,9 +304,9 @@ configure_keepalive_menu() {
 		fi
 		echo ""
 		echo -e "  ${WHITE}1)${NC} Set Custom Interval (minutes)"
-		echo -e "  ${WHITE}2)${NC} Profile: Aggressive (1 min)"
-		echo -e "  ${GREEN}3)${NC} Profile: Normal (3 min) ${GREEN}[Recommended]${NC}"
-		echo -e "  ${WHITE}4)${NC} Profile: Economy (5 min)"
+		echo -e "  ${WHITE}2)${NC} Profile: Aggressive (30 sec)"
+		echo -e "  ${GREEN}3)${NC} Profile: Normal (1 min) ${GREEN}[Recommended]${NC}"
+		echo -e "  ${WHITE}4)${NC} Profile: Economy (3 min)"
 		echo -e "  ${GREEN}5)${NC} Start Keepalive"
 		echo -e "  ${RED}6)${NC} Stop Keepalive"
 		echo -e "  ${WHITE}0)${NC} Go Back\n"
@@ -298,10 +322,10 @@ configure_keepalive_menu() {
 				fi
 				sleep 1
 				;;
-			2) start_keepalive 60; echo -e "  ${GREEN}Started.${NC}"; sleep 1 ;;
-			3) start_keepalive 180; echo -e "  ${GREEN}Started.${NC}"; sleep 1 ;;
-			4) start_keepalive 300; echo -e "  ${GREEN}Started.${NC}"; sleep 1 ;;
-			5) start_keepalive "$(cat "$KEEPALIVE_CONF" 2>/dev/null || echo 180)"; echo -e "  ${GREEN}Started.${NC}"; sleep 1 ;;
+			2) start_keepalive 30;  echo -e "  ${GREEN}Started.${NC}"; sleep 1 ;;
+			3) start_keepalive 60;  echo -e "  ${GREEN}Started.${NC}"; sleep 1 ;;
+			4) start_keepalive 180; echo -e "  ${GREEN}Started.${NC}"; sleep 1 ;;
+			5) start_keepalive "$(cat "$KEEPALIVE_CONF" 2>/dev/null || echo 60)"; echo -e "  ${GREEN}Started.${NC}"; sleep 1 ;;
 			6) stop_keepalive ;;
 			0) break ;;
 		esac
@@ -316,7 +340,7 @@ if [ "${1:-}" = "--silent-start" ]; then
 		ensure_codespace_port_public
 	fi
 	if ! kill -0 "$(cat "$KEEPALIVE_PID" 2>/dev/null)" 2>/dev/null; then
-		_interval=$(cat "$KEEPALIVE_CONF" 2>/dev/null || echo 180)
+		_interval=$(cat "$KEEPALIVE_CONF" 2>/dev/null || echo 60)
 		start_keepalive "$_interval"
 	fi
 	exit 0
@@ -325,7 +349,7 @@ fi
 trap 'echo -e "\nGoodbye."; exit 0' EXIT INT TERM
 
 if ! kill -0 "$(cat "$KEEPALIVE_PID" 2>/dev/null)" 2>/dev/null; then
-	_interval=$(cat "$KEEPALIVE_CONF" 2>/dev/null || echo 180)
+	_interval=$(cat "$KEEPALIVE_CONF" 2>/dev/null || echo 60)
 	start_keepalive "$_interval" >/dev/null
 fi
 
@@ -422,11 +446,6 @@ while true; do
 			echo -e "  ${GREEN}📱 Mobile Config saved to:${NC}"
 			echo -e "  ${WHITE}${MOBILE_CONFIG_FILE}${NC}"
 			echo -e "  ${DIM}Open that file and copy the link directly into your mobile app.${NC}"
-			echo -e "  ${YELLOW}──────────────────────────────────────────────${NC}"
-			echo -e "  ${GREEN}🚀 Want Faster Speeds?${NC}"
-			echo -e "  ${WHITE}To get more IPs for your config, go to our generator:${NC}"
-			echo -e "  ${GREEN}👉 https://code-leafy.github.io/NetLeafy/${NC}"
-			echo -e "  ${DIM}(Select 'G2ray' and paste your config there)${NC}"
 			echo -e "  ${YELLOW}──────────────────────────────────────────────${NC}\n"
 			read -rp "  Press Enter to return..."
 			;;
